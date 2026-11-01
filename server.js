@@ -26,10 +26,11 @@ async function arreglarUnaPelicula(peli){
   console.log(`[AUTO] Arreglando ID ${peli.id} - ${peli.titulo}`);
   let browser;
   try{
-    browser = await puppeteer.launch({
-      headless: true,
-      args: ['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage','--disable-gpu','--single-process','--no-zygote']
-    });
+browser = await puppeteer.launch({
+  headless: true,
+  executablePath: puppeteer.executablePath(),
+  args: ['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage','--disable-gpu','--single-process','--no-zygote']
+});
     const page = await browser.newPage();
     await page.setUserAgent('Mozilla/5.0');
 
