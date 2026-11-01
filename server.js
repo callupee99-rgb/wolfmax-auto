@@ -10,7 +10,6 @@ const SUPABASE_URL = "https://lrwowvaxygmptvemxcip.supabase.co";
 const SUPABASE_KEY = "sb_publishable_veXOpEWJtSXgKojUcSywWQ_AMY1GUwj";
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
-// NO TOCAR NUNCA - NO VENCEN
 const NO_TOCAR = ['voe.sx', 'voe-network', 'streamtape', 'dood', 'mixdrop', 'uqload', 'voe-unblock'];
 
 function getExpiracion(url){
@@ -36,12 +35,12 @@ function getCalidadScore(url){
 }
 
 async function arreglarUnaPelicula(peli){
-  console.log(`[AUTO] ID ${peli.id} - ${peli.titulo}`);
+  console.log(`[AUTO] ID ${peli.id} - ${peli.titulo} - ${peli.url_pagina}`);
   let browser;
   try{
     browser = await puppeteer.launch({
-      args: [...chromium.args, '--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
-      defaultViewport: chromium.defaultViewport,
+      args: [...chromium.args, '--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
+      defaultViewport: {width: 1280, height: 720},
       executablePath: await chromium.executablePath(),
       headless: chromium.headless,
     });
@@ -55,70 +54,78 @@ async function arreglarUnaPelicula(peli){
 
     await page.setRequestInterception(true);
     page.on('request', req=>{
-      const url=req.url().toLowerCase();
-      if(url.includes('supabase.co') || url.includes('vime') || url.includes('filemoon') || url.includes('filelions')){
+      const low=req.url().toLowerCase();
+      if(low.includes('supabase.co') || low.includes('vime') || low.includes('filemoon') || low.includes('filelions')){
         req.continue(); return;
       }
-      if(url.includes('doubleclick')||url.includes('googlesyndication')||url.includes('googletagmanager')||url.includes('adsterra')||url.includes('popads')||url.includes('popcash')){
+      if(low.includes('doubleclick')||low.includes('googlesyndication')||low.includes('googletagmanager')||low.includes('adsterra')||low.includes('popads')||low.includes('popcash')){
         req.abort(); return;
       }
       req.continue();
     });
 
     page.on('response', async res=>{
-      const url=res.url();
-      const low=url.toLowerCase();
-      if(!low.includes('.m3u8')) return;
-      if(low.includes('/index-a') && !low.includes('/index-v')) return;
-      if(low.includes('/audio/')) return;
-      if(low.includes('preroll') || low.includes('/ad/')) return;
-      
-      const exp=getExpiracion(url);
-      const calidad=getCalidadScore(url);
-      // Guardar siempre el de mayor expiración y mejor calidad
-      if(exp > mejorExpira || (exp === mejorExpira && calidad > mejorCalidad) || (mejorExpira===0 && !m3u8Bueno)){
-        mejorExpira=exp;
-        mejorCalidad=calidad;
-        m3u8Bueno=url;
-        const horas = exp ? Math.floor((exp-Date.now()/1000)/3600) : 0;
-        console.log(`[ENCONTRADO ${horas}h Q${calidad}] ${url.substring(0,80)}`);
-      }
+      try{
+        const url=res.url();
+        const low=url.toLowerCase();
+        if(!low.includes('.m3u8')) return;
+        if(low.includes('thumb') || low.includes('sprite')) return;
+        if(low.includes('/index-a') && !low.includes('/index-v')) return;
+        if(low.includes('/audio/')) return;
+        if(low.includes('preroll') || (low.includes('/ad/') && !low.includes('vime'))) return;
+
+        const exp=getExpiracion(url);
+        const calidad=getCalidadScore(url);
+        console.log(`[CANDIDATO ${exp ? Math.floor((exp-Date.now()/1000)/3600)+'h' : '0h'} Q${calidad}] ${url.substring(0,100)}`);
+
+        if(exp > mejorExpira || (exp===mejorExpira && calidad>mejorCalidad) || !m3u8Bueno){
+          mejorExpira=exp;
+          mejorCalidad=calidad;
+          m3u8Bueno=url;
+        }
+      }catch(e){}
     });
 
-    await page.goto(peli.url_pagina, {waitUntil:'domcontentloaded', timeout:60000});
-    await page.evaluate(()=>{
-      window.open=()=>null;
-      function autoClick(){
+    await page.goto(peli.url_pagina, {waitUntil:'domcontentloaded', timeout:90000});
+
+    // CLICK AGRESIVO 40 SEGUNDOS
+    for(let i=0; i<40; i++){
+      await page.evaluate(()=>{
         try{
+          window.open=()=>null;
           document.querySelectorAll('button').forEach(b=>{
             const t=(b.innerText||'').toLowerCase();
-            if(t==='cerrar' || t==='close' || t.includes('skip') || t.includes('continue')) b.click();
+            if(t==='cerrar' || t==='close' || t.includes('skip') || t.includes('continue') || t.includes('entendido') || t.includes('agree')) b.click();
           });
           const c=document.elementFromPoint(window.innerWidth/2, window.innerHeight/2);
           if(c) c.click();
-          document.querySelectorAll('.jw-display-icon-container, .vjs-big-play-button, .jw-icon-display, .vjs-big-play').forEach(el=>{
+          document.querySelectorAll('.jw-display-icon-container, .jw-icon-display, .vjs-big-play-button, .jw-display, [class*="play-button"], .play-button').forEach(el=>{
             const r=el.getBoundingClientRect();
-            if(r.width>30) el.click();
+            if(r.width>20) el.click();
           });
           document.querySelectorAll('video').forEach(v=>{ if(v.paused) v.play().catch(()=>{}); });
+          document.querySelectorAll('.fc-ab-root, #cboxOverlay, .jw-modal').forEach(el=>{ try{el.remove()}catch(e){} });
         }catch(e){}
+      });
+      await new Promise(r=>setTimeout(r, 1000));
+      if(m3u8Bueno && mejorExpira>0) {
+        console.log(`Encontrado rápido en ${i}s, saliendo...`);
+        break;
       }
-      setInterval(autoClick, 700);
-    });
-    await new Promise(r=>setTimeout(r, 30000));
+    }
 
     if(m3u8Bueno){
       const fecha= mejorExpira ? new Date(mejorExpira*1000).toISOString() : new Date().toISOString();
       const updateData = {url_video:m3u8Bueno, expira_at:fecha};
       if(mejorExpira) updateData.expira_en = mejorExpira;
       await supabase.from('peliculas_series').update(updateData).eq('id', peli.id);
-      console.log(`[GUARDADO OK] ID ${peli.id}`);
+      console.log(`[GUARDADO OK] ID ${peli.id} - ${m3u8Bueno.substring(0,80)}`);
     } else {
-      console.log(`[FALLO] No m3u8 ID ${peli.id}`);
+      console.log(`[FALLO] No m3u8 ID ${peli.id} - ${peli.url_pagina}`);
     }
     await browser.close();
     return !!m3u8Bueno;
-  }catch(e){ console.log('Error ID', peli.id, e.message); if(browser) await browser.close(); return false; }
+  }catch(e){ console.log('Error ID', peli.id, e.message); if(browser) try{await browser.close()}catch(_){} return false; }
 }
 
 async function loopAuto(){
@@ -133,12 +140,9 @@ async function loopAuto(){
   const ahora = Math.floor(Date.now()/1000);
   const vencidos = data.filter(p=>{
     const pagina = (p.url_pagina||'').toLowerCase();
-    // FIX 232011: Ignorar Voe y similares, no vencen
     if(NO_TOCAR.some(d=>pagina.includes(d))) return false;
-    
     let exp = p.expira_en || 0;
     if(!exp && p.url_video) exp=getExpiracion(p.url_video);
-    // Si no tiene expira (es Voe viejo) no lo toques
     if(!exp && !p.expira_en) return false;
     return !exp || exp < ahora+3600;
   });
@@ -150,7 +154,7 @@ async function loopAuto(){
   }
 }
 
-app.get('/', (req,res)=>res.send('Wolfmax 24/7 ONLINE - Voe Ignorado - CHROMIUM OK'));
+app.get('/', (req,res)=>res.send('Wolfmax 24/7 ONLINE - Voe Ignorado - 40s Fix - CHROMIUM OK'));
 app.get('/status', async (req,res)=>{
   const { data } = await supabase.from('peliculas_series').select('id').eq('tipo','pelicula').not('url_pagina','is',null);
   res.json({total:data?.length, online:true, hora:new Date().toLocaleString('es-PE')});
