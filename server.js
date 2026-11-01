@@ -1,5 +1,6 @@
 const express = require('express');
-const puppeteer = require('puppeteer');
+const puppeteer = require('puppeteer-core');
+const chromium = require('@sparticuz/chromium');
 const { createClient } = require('@supabase/supabase-js');
 
 const app = express();
@@ -26,10 +27,12 @@ async function arreglarUnaPelicula(peli){
   console.log(`[AUTO] Arreglando ID ${peli.id} - ${peli.titulo}`);
   let browser;
   try{
-browser = await puppeteer.launch({
-  headless: true,
-  args: ['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage','--disable-gpu','--single-process','--no-zygote']
-});
+    browser = await puppeteer.launch({
+      args: chromium.args,
+      defaultViewport: chromium.defaultViewport,
+      executablePath: await chromium.executablePath(),
+      headless: chromium.headless,
+    });
     const page = await browser.newPage();
     await page.setUserAgent('Mozilla/5.0');
 
@@ -94,7 +97,7 @@ async function loopAuto(){
   }
 }
 
-app.get('/', (req,res)=>res.send('Wolfmax 24/7 ONLINE - Tiempo Real - Solo Pelis'));
+app.get('/', (req,res)=>res.send('Wolfmax 24/7 ONLINE - Tiempo Real - Solo Pelis - CHROMIUM OK'));
 app.get('/status', async (req,res)=>{
   const { data } = await supabase.from('peliculas_series').select('id').eq('tipo','pelicula').not('url_pagina','is',null);
   res.json({total:data?.length, online:true, hora:new Date().toLocaleString('es-PE')});
