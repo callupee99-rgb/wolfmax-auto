@@ -1,15 +1,29 @@
-name: Wolfmax Auto
+name: Wolfmax 24/7 Auto-Fix
+
 on:
   schedule:
-    - cron: '0 */6 * * *'
+    - cron: '*/30 * * * *'  # cada 30 minutos TIEMPO REAL
   workflow_dispatch:
+
 jobs:
-  run:
+  fix:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
         with:
-          node-version: 20
-      - run: npm install
-      - run: node server.js
+          node-version: '20'
+
+      - name: Install
+        run: npm install
+
+      - name: Install Chrome for Puppeteer
+        run: npx puppeteer browsers install chrome
+
+      - name: Run Auto Fix
+        run: node server.js
+        # Si tu server.js es infinito, usa esto en vez:
+        # run: timeout 1700 node server.js || true
