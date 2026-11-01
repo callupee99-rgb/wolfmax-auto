@@ -24,6 +24,6 @@ jobs:
         run: npx puppeteer browsers install chrome
 
       - name: Run Auto Fix
-        run: node server.js
+        run: timeout 1500 node server.js || true
         # Si tu server.js es infinito, usa esto en vez:
         # run: timeout 1700 node server.js || true
