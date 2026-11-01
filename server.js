@@ -26,7 +26,7 @@ async function arreglarUnaPelicula(peli){
   console.log(`[AUTO] Arreglando ID ${peli.id} - ${peli.titulo}`);
   let browser;
   try{
-        browser = await puppeteer.launch({
+    browser = await puppeteer.launch({
       headless: true,
       args: ['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage','--disable-gpu','--single-process','--no-zygote']
     });
@@ -74,8 +74,12 @@ async function arreglarUnaPelicula(peli){
 }
 
 async function loopAuto(){
-  console.log('--- Revisando vencidos ---');
-  const { data } = await supabase.from('peliculas_series').select('id,titulo,url_pagina,url_video,expira_en').not('url_pagina','is',null).limit(1000);
+  console.log('--- Revisando vencidos SOLO PELICULAS ---');
+  const { data } = await supabase.from('peliculas_series')
+    .select('id,titulo,url_pagina,url_video,expira_en')
+    .eq('tipo','pelicula')
+    .not('url_pagina','is',null)
+    .limit(1000);
   if(!data) return;
   const ahora = Math.floor(Date.now()/1000);
   const vencidos = data.filter(p=>{
@@ -90,9 +94,9 @@ async function loopAuto(){
   }
 }
 
-app.get('/', (req,res)=>res.send('Wolfmax 24/7 ONLINE - Tiempo Real'));
+app.get('/', (req,res)=>res.send('Wolfmax 24/7 ONLINE - Tiempo Real - Solo Pelis'));
 app.get('/status', async (req,res)=>{
-  const { data } = await supabase.from('peliculas_series').select('id').not('url_pagina','is',null);
+  const { data } = await supabase.from('peliculas_series').select('id').eq('tipo','pelicula').not('url_pagina','is',null);
   res.json({total:data?.length, online:true, hora:new Date().toLocaleString('es-PE')});
 });
 app.get('/fix-now', async (req,res)=>{
