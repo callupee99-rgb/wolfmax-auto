@@ -1,0 +1,7 @@
+{
+  "name": "wolfmax-auto",
+  "dependencies": {
+    "puppeteer-core": "22.13.0",
+    "@sparticuz/chromium": "123.0.0"
+  }
+}
