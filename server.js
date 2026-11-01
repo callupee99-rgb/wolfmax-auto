@@ -28,7 +28,8 @@ async function arreglarUnaPelicula(peli){
   try{
     browser = await puppeteer.launch({
       headless: true,
-      args: ['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage']
+      executablePath: '/opt/render/.cache/puppeteer/chrome/linux-127.0.6533.88/chrome-linux64/chrome',
+      args: ['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage','--disable-gpu','--single-process','--no-zygote']
     });
     const page = await browser.newPage();
     await page.setUserAgent('Mozilla/5.0');
@@ -55,17 +56,18 @@ async function arreglarUnaPelicula(peli){
     });
 
     await page.goto(peli.url_pagina, {waitUntil:'networkidle2', timeout:60000});
-    // Auto-click play como en tu main.js
     await page.evaluate(()=>{
       function autoClick(){ document.elementFromPoint(window.innerWidth/2, window.innerHeight/2)?.click(); document.querySelectorAll('.jw-display-icon-container, .vjs-big-play-button').forEach(el=>el.click()); }
       setInterval(autoClick, 800);
     });
-    await new Promise(r=>setTimeout(r, 25000)); // Espera 25s a que caiga el m3u8
+    await new Promise(r=>setTimeout(r, 25000));
 
     if(m3u8Bueno){
       const fecha=new Date(mejorExpira*1000).toISOString();
       await supabase.from('peliculas_series').update({url_video:m3u8Bueno, expira_en:mejorExpira, expira_at:fecha}).eq('id', peli.id);
       console.log(`[GUARDADO OK] ID ${peli.id}`);
+    } else {
+      console.log(`[FALLO] No se encontró m3u8 para ID ${peli.id}`);
     }
     await browser.close();
     return !!m3u8Bueno;
@@ -80,16 +82,15 @@ async function loopAuto(){
   const vencidos = data.filter(p=>{
     let exp = p.expira_en || 0;
     if(!exp && p.url_video) exp=getExpiracion(p.url_video);
-    return !exp || exp < ahora+3600; // vence en menos de 1h
+    return !exp || exp < ahora+3600;
   });
   console.log(`Vencidos: ${vencidos.length}`);
-  for(let peli of vencidos.slice(0,3)){ // arregla 3 por ciclo para no saturar
+  for(let peli of vencidos.slice(0,3)){
     await arreglarUnaPelicula(peli);
     await new Promise(r=>setTimeout(r, 5000));
   }
 }
 
-// SERVIDOR WEB
 app.get('/', (req,res)=>res.send('Wolfmax 24/7 ONLINE - Tiempo Real'));
 app.get('/status', async (req,res)=>{
   const { data } = await supabase.from('peliculas_series').select('id').not('url_pagina','is',null);
@@ -102,6 +103,6 @@ app.get('/fix-now', async (req,res)=>{
 
 app.listen(PORT, ()=>{
   console.log(`Servidor en puerto ${PORT}`);
-  setInterval(loopAuto, 60*1000); // cada 1 minuto revisa = TIEMPO REAL
+  setInterval(loopAuto, 60*1000);
   loopAuto();
 });
