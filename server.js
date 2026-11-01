@@ -39,77 +39,81 @@ async function arreglarUnaPelicula(peli){
   let browser;
   try{
     browser = await puppeteer.launch({
-      args: [...chromium.args, '--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
+      args: [...chromium.args, '--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu', '--single-process'],
       defaultViewport: {width: 1280, height: 720},
       executablePath: await chromium.executablePath(),
       headless: chromium.headless,
     });
     const page = await browser.newPage();
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122.0.0.0 Safari/537.36');
-    await page.setExtraHTTPHeaders({'Accept-Language': 'es-PE,es;q=0.9'});
-
+    
     let m3u8Bueno = null;
     let mejorExpira = 0;
     let mejorCalidad = 0;
 
     await page.setRequestInterception(true);
     page.on('request', req=>{
-      const low=req.url().toLowerCase();
-      if(low.includes('supabase.co') || low.includes('vime') || low.includes('filemoon') || low.includes('filelions')){
-        req.continue(); return;
-      }
-      if(low.includes('doubleclick')||low.includes('googlesyndication')||low.includes('googletagmanager')||low.includes('adsterra')||low.includes('popads')||low.includes('popcash')){
-        req.abort(); return;
-      }
-      req.continue();
+      try{
+        const low=req.url().toLowerCase();
+        if(low.includes('supabase.co') || low.includes('vime') || low.includes('filemoon') || low.includes('.m3u8')){
+          req.continue(); return;
+        }
+        if(low.includes('doubleclick')||low.includes('googlesyndication')||low.includes('googletagmanager')||low.includes('adsterra')||low.includes('popads')){
+          req.abort(); return;
+        }
+        req.continue();
+      }catch(e){}
     });
 
     page.on('response', async res=>{
       try{
         const url=res.url();
+        if(!url.toLowerCase().includes('.m3u8')) return;
         const low=url.toLowerCase();
-        if(!low.includes('.m3u8')) return;
         if(low.includes('thumb') || low.includes('sprite')) return;
         if(low.includes('/index-a') && !low.includes('/index-v')) return;
-        if(low.includes('/audio/')) return;
-        if(low.includes('preroll') || (low.includes('/ad/') && !low.includes('vime'))) return;
-
         const exp=getExpiracion(url);
         const calidad=getCalidadScore(url);
-        console.log(`[CANDIDATO ${exp ? Math.floor((exp-Date.now()/1000)/3600)+'h' : '0h'} Q${calidad}] ${url.substring(0,100)}`);
-
-        if(exp > mejorExpira || (exp===mejorExpira && calidad>mejorCalidad) || !m3u8Bueno){
+        if(!m3u8Bueno || exp > mejorExpira || (exp===mejorExpira && calidad>mejorCalidad)){
           mejorExpira=exp;
           mejorCalidad=calidad;
           m3u8Bueno=url;
+          console.log(`[CANDIDATO ${exp ? Math.floor((exp-Date.now()/1000)/3600)+'h' : '0h'} Q${calidad}] ${url.substring(0,100)}`);
         }
       }catch(e){}
     });
 
     await page.goto(peli.url_pagina, {waitUntil:'domcontentloaded', timeout:90000});
+    await new Promise(r=>setTimeout(r, 5000));
 
-    // CLICK AGRESIVO 40 SEGUNDOS
     for(let i=0; i<40; i++){
-      await page.evaluate(()=>{
-        try{
-          window.open=()=>null;
-          document.querySelectorAll('button').forEach(b=>{
-            const t=(b.innerText||'').toLowerCase();
-            if(t==='cerrar' || t==='close' || t.includes('skip') || t.includes('continue') || t.includes('entendido') || t.includes('agree')) b.click();
-          });
-          const c=document.elementFromPoint(window.innerWidth/2, window.innerHeight/2);
-          if(c) c.click();
-          document.querySelectorAll('.jw-display-icon-container, .jw-icon-display, .vjs-big-play-button, .jw-display, [class*="play-button"], .play-button').forEach(el=>{
-            const r=el.getBoundingClientRect();
-            if(r.width>20) el.click();
-          });
-          document.querySelectorAll('video').forEach(v=>{ if(v.paused) v.play().catch(()=>{}); });
-          document.querySelectorAll('.fc-ab-root, #cboxOverlay, .jw-modal').forEach(el=>{ try{el.remove()}catch(e){} });
-        }catch(e){}
-      });
+      try{
+        await page.evaluate(()=>{
+          try{
+            window.open=()=>null;
+            document.querySelectorAll('button').forEach(b=>{
+              const t=(b.innerText||'').toLowerCase();
+              if(t.includes('cerrar') || t.includes('close') || t.includes('skip')) b.click();
+            });
+            const c=document.elementFromPoint(window.innerWidth/2, window.innerHeight/2);
+            if(c) c.click();
+            document.querySelectorAll('.jw-display-icon-container, .vjs-big-play-button, .jw-icon-display').forEach(el=>{ 
+              try{ const r=el.getBoundingClientRect(); if(r.width>20) el.click(); }catch(e){} 
+            });
+            document.querySelectorAll('video').forEach(v=>{ try{ if(v.paused) v.play().catch(()=>{}); }catch(e){} });
+            document.querySelectorAll('.fc-ab-root, #cboxOverlay').forEach(el=>{ try{el.remove()}catch(e){} });
+          }catch(e){}
+        });
+      }catch(e){
+        if(e.message.includes('Execution context was destroyed') || e.message.includes('Target closed')){
+          console.log(`[NAV ${i}s] Navegacion ignorada, esperando m3u8...`);
+          await new Promise(r=>setTimeout(r, 1000));
+          continue;
+        }
+      }
       await new Promise(r=>setTimeout(r, 1000));
       if(m3u8Bueno && mejorExpira>0) {
-        console.log(`Encontrado rápido en ${i}s, saliendo...`);
+        console.log(`Encontrado en ${i}s`);
         break;
       }
     }
@@ -119,13 +123,17 @@ async function arreglarUnaPelicula(peli){
       const updateData = {url_video:m3u8Bueno, expira_at:fecha};
       if(mejorExpira) updateData.expira_en = mejorExpira;
       await supabase.from('peliculas_series').update(updateData).eq('id', peli.id);
-      console.log(`[GUARDADO OK] ID ${peli.id} - ${m3u8Bueno.substring(0,80)}`);
+      console.log(`[GUARDADO OK] ID ${peli.id}`);
     } else {
       console.log(`[FALLO] No m3u8 ID ${peli.id} - ${peli.url_pagina}`);
     }
     await browser.close();
     return !!m3u8Bueno;
-  }catch(e){ console.log('Error ID', peli.id, e.message); if(browser) try{await browser.close()}catch(_){} return false; }
+  }catch(e){ 
+    console.log('Error ID', peli.id, e.message); 
+    if(browser) try{await browser.close()}catch(_){} 
+    return false; 
+  }
 }
 
 async function loopAuto(){
@@ -154,7 +162,7 @@ async function loopAuto(){
   }
 }
 
-app.get('/', (req,res)=>res.send('Wolfmax 24/7 ONLINE - Voe Ignorado - 40s Fix - CHROMIUM OK'));
+app.get('/', (req,res)=>res.send('Wolfmax 24/7 ONLINE - Fix Execution Context - CHROMIUM OK'));
 app.get('/status', async (req,res)=>{
   const { data } = await supabase.from('peliculas_series').select('id').eq('tipo','pelicula').not('url_pagina','is',null);
   res.json({total:data?.length, online:true, hora:new Date().toLocaleString('es-PE')});
