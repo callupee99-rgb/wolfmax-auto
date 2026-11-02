@@ -1,22 +1,28 @@
-const express = require('express');
-const puppeteer = require('puppeteer-core');
-const chromium = require('@sparticuz/chromium');
-const { createClient } = require('@supabase/supabase-js');
-
-const app = express();
-const PORT = process.env.PORT || 3000;
+const { app, BrowserWindow, session, ipcMain } = require('electron');
 
 const SUPABASE_URL = "https://lrwowvaxygmptvemxcip.supabase.co";
 const SUPABASE_KEY = "sb_publishable_veXOpEWJtSXgKojUcSywWQ_AMY1GUwj";
-const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+const HEADERS = { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' };
 
-// IGUAL QUE TU ELECTRON - NO SE BLOQUEAN NUNCA
+let win;
+let videoWin = null;
+let currentPeli = null;
+let m3u8List = [];
+let mejorExpira = 0;
+let mejorCalidad = 0;
+let colaVencidos = [];
+let modoAuto = false;
+let procesandoCola = false;
+
+// DOMINIOS QUE NO SE BLOQUEAN NUNCA
 const SAFE_DOMAINS = ['supabase.co', 'voe.sx', 'voe-network', 'streamtape', 'dood', 'mixdrop', 'filelions', 'filemoon', 'vimeos', 'vimeus'];
 const AD_DOMAINS = ['doubleclick.net','googlesyndication.com','googletagmanager.com','googletagservices.com','imasdk.googleapis.com','pubads.g.doubleclick.net','googleads','adservice','adsterra','popads','popcash','popunder','propeller','exoclick','onclickads','highperformance','adcash','hilltopads','zeropark','clickadu','aniview','ima'];
 
 function esAnuncio(url){
   const low=url.toLowerCase();
+  // NUNCA bloquear dominios seguros
   if(SAFE_DOMAINS.some(d=>low.includes(d))){
+    // pero si es un anuncio dentro de vimeos, si bloquear
     if((low.includes('vimeos') || low.includes('vimeus')) && (low.includes('/ad') || low.includes('vast') || low.includes('preroll') || low.includes('ima') || low.includes('aniview'))){
       return true;
     }
@@ -26,6 +32,9 @@ function esAnuncio(url){
   if(low.includes('.mp4') && (low.includes('preroll') || low.includes('vast'))) return true;
   return AD_DOMAINS.some(d => low.includes(d));
 }
+
+async function fetchM3U8(url){ try{ const r=await fetch(url,{headers:{'User-Agent':'Mozilla/5.0', 'Referer':'https://voe.sx/'}, signal: AbortSignal.timeout(5000)}); return await r.text(); }catch(e){ return ""; } }
+function getDuracionM3U8(c){ let d=0; const m=c.match(/#EXTINF:([\d\.]+)/g); if(m){ m.forEach(x=>{ const v=parseFloat(x.replace('#EXTINF:','')); if(!isNaN(v)) d+=v; }); } return d; }
 
 function getExpiracion(url){
   try{
@@ -49,13 +58,6 @@ function getCalidadScore(url){
   return 10;
 }
 
-function getDuracionM3U8(c){ 
-  let d=0; 
-  const m=c.match(/#EXTINF:([\d\.]+)/g); 
-  if(m){ m.forEach(x=>{ const v=parseFloat(x.replace('#EXTINF:','')); if(!isNaN(v)) d+=v; }); } 
-  return d; 
-}
-
 function esAudioSolo(c, url){
   const low = (url||'').toLowerCase();
   if(/\/index-v\d+/i.test(low)) return false;
@@ -69,175 +71,143 @@ function esAudioSolo(c, url){
   return false;
 }
 
-function esVideoAnuncio(c){
+function esVideoAnuncio(c,url){
   const dur=getDuracionM3U8(c);
   if(dur>0 && dur<90) return true;
   if(dur>40000) return true;
   return false;
 }
+async function actualizarUrlVideo(id,url,exp){
+  const fecha=exp?new Date(exp*1000).toISOString():null;
+  const response=await fetch(`${SUPABASE_URL}/rest/v1/peliculas_series?id=eq.${id}`,{method:'PATCH',headers:HEADERS,body:JSON.stringify({url_video:url,expira_en:exp,expira_at:fecha})});
+  if(!response.ok) throw new Error(`Supabase link update failed (HTTP ${response.status})`);
+}
+function createWindow(){ win=new BrowserWindow({width:1400,height:900,webPreferences:{nodeIntegration:true,contextIsolation:false,backgroundThrottling:false}}); win.loadFile('index.html'); }
 
-async function arreglarUnaPelicula(peli){
-  console.log(`[AUTO] ID ${peli.id} - ${peli.titulo} - ${peli.url_pagina}`);
-  let browser;
-  let m3u8List = [];
-  let mejorExpira = 0;
-  let mejorCalidad = 0;
-  let m3u8Bueno = null;
+ipcMain.handle('verificar-m3u8', async (e,url)=>{
+  const low = url.toLowerCase();
+  // VOE NO SE VERIFICA POR M3U8, SIEMPRE ESTA OK
+  if(low.includes('voe.sx') || low.includes('voe-') || low.includes('voe-network') || low.includes('streamtape') || low.includes('dood')){
+    return {ok:true,status:200,audio:false};
+  }
+  const headersList = [
+    {'User-Agent':'Mozilla/5.0','Referer':'https://vimeus.net/','Origin':'https://vimeus.net'},
+    {'User-Agent':'Mozilla/5.0','Referer':'https://vimeos.net/','Origin':'https://vimeos.net'},
+    {'User-Agent':'Mozilla/5.0','Referer':'https://vimeos.zip/','Origin':'https://vimeos.zip'},
+    {'User-Agent':'Mozilla/5.0','Referer':'https://filemoon.sx/','Origin':'https://filemoon.sx'},
+    {'User-Agent':'Mozilla/5.0'}
+  ];
+  for(const headers of headersList){
+    try{
+      const r=await fetch(url,{headers, signal:AbortSignal.timeout(5000)});
+      const t=await r.text();
+      if(r.ok && t.includes('#EXT')) return {ok:true,status:r.status,audio:false};
+      if(r.status===403 || r.status===401) continue;
+      if(r.ok && t.length>50) return {ok:true,status:r.status,audio:false};
+    }catch(err){ continue; }
+  }
+  return {ok:false,status:403,audio:false};
+});
 
-  try{
-    browser = await puppeteer.launch({
-      args: [...chromium.args, '--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
-      defaultViewport: {width: 1280, height: 720},
-      executablePath: await chromium.executablePath(),
-      headless: chromium.headless,
-    });
-    const page = await browser.newPage();
-    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122.0.0.0 Safari/537.36');
-    await page.setExtraHTTPHeaders({'Referer': 'https://voe.sx/'});
+function abrirSiguienteDeCola(){
+  if(procesandoCola) return;
+  if(colaVencidos.length===0){
+    modoAuto=false; procesandoCola=false;
+    if(win && !win.isDestroyed()) win.webContents.send('cola-fin');
+    if(videoWin && !videoWin.isDestroyed()){ try{ videoWin.destroy(); }catch(e){} videoWin=null; }
+    return;
+  }
+  procesandoCola=true;
+  const sig=colaVencidos.shift();
+  if(win && !win.isDestroyed()) win.webContents.send('cola-update',{restantes:colaVencidos.length,actual:sig.titulo});
+  openVideoPage(sig.url,{id:sig.id,titulo:sig.titulo},true);
+}
 
-    await page.setRequestInterception(true);
-    page.on('request', req=>{
+function openVideoPage(url,peli,esAuto=false){
+  modoAuto=esAuto; currentPeli=peli; m3u8List=[]; mejorExpira=0; mejorCalidad=0;
+  if(videoWin && !videoWin.isDestroyed()){ try{ videoWin.destroy(); }catch(e){} videoWin=null; }
+  videoWin=new BrowserWindow({
+    width:1300,height:900,show:false,
+    webPreferences:{nodeIntegration:false,contextIsolation:true, webSecurity: false, backgroundThrottling:false}
+  });
+  videoWin.webContents.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122.0.0.0 Safari/537.36');
+  videoWin.webContents.setWindowOpenHandler(()=>({action:'deny'}));
+  videoWin.loadURL(url);
+  let timeoutSin=null;
+  if(modoAuto){ timeoutSin=setTimeout(()=>{ if(videoWin && !videoWin.isDestroyed()) videoWin.destroy(); },60000); }
+
+  videoWin.webContents.on('did-start-loading', ()=>{
+    if(!videoWin || videoWin.isDestroyed()) return;
+    videoWin.webContents.executeJavaScript(`try{ window.open=function(){ return null; }; }catch(e){}`).catch(()=>{});
+  });
+
+  videoWin.webContents.on('did-finish-load', ()=>{
+    if(!videoWin || videoWin.isDestroyed()) return;
+    videoWin.webContents.executeJavaScript(`
       try{
-        const url=req.url();
-        const low=url.toLowerCase();
-        // SI ES VOE / DOOD / STREAMTAPE, DEJA PASAR TODO, IGUAL QUE ELECTRON
-        if(low.includes('voe.sx') || low.includes('voe-network') || low.includes('streamtape') || low.includes('dood') || low.includes('mixdrop')){
-          req.continue(); return;
-        }
-        if(esAnuncio(url)){ req.abort(); return; }
-        if(url.includes(".m3u8")){
-          const lowUrl = url.toLowerCase();
-          if(/\/index-a\d+\.m3u8/i.test(lowUrl) && !/\/index-v\d+/i.test(lowUrl)){ 
-            console.log('[AUDIO PURO BLOQUEADO]', url.substring(0,60)); 
-            req.abort(); return; 
-          }
-          if(lowUrl.includes('/audio/') && !lowUrl.includes('index-v')){ req.abort(); return; }
-        }
-        req.continue();
-      }catch(e){ try{req.continue()}catch(_){} }
-    });
-
-    page.on('response', async res=>{
-      try{
-        const url=res.url();
-        if(!url.includes(".m3u8")) return;
-        if(m3u8List.includes(url)) return;
-        
-        const low=url.toLowerCase();
-        if(low.includes('voe.sx') || low.includes('voe-network') || low.includes('streamtape') || low.includes('dood')){
-          // VOE SIEMPRE SE GUARDA, NO SE VERIFICA
-          m3u8List.push(url);
-          mejorExpira=0;
-          m3u8Bueno=url;
-          console.log(`[VOE GUARDADO] ${url.substring(0,80)}`);
-          return;
-        }
-
-        // Para vimeos/filemoon, descargar contenido y verificar
-        let contenido = "";
-        try{
-          contenido = await page.evaluate(async (u) => {
-            try{ const r=await fetch(u); return await r.text(); }catch(e){ return ""; }
-          }, url);
-        }catch(e){}
-
-        if(esAudioSolo(contenido, url)){ console.log('[AUDIO BLOQUEADO]', url.substring(0,60)); return; }
-        if(esVideoAnuncio(contenido)){ console.log('[VIDEO ANUNCIO BLOQUEADO]', url.substring(0,60)); return; }
-
-        m3u8List.push(url);
-        const expira=getExpiracion(url);
-        const calidad=getCalidadScore(url);
-        let debeGuardar=false;
-        if(expira>mejorExpira) debeGuardar=true;
-        else if(expira===mejorExpira && calidad>mejorCalidad) debeGuardar=true;
-        else if(mejorExpira===0 && !m3u8Bueno) debeGuardar=true;
-
-        if(debeGuardar){
-          mejorExpira=expira; mejorCalidad=calidad; m3u8Bueno=url;
-          console.log(`[VIDEO GUARDADO ${expira?Math.floor((expira-Date.now()/1000)/3600)+'h':'VOE'} Q${calidad}] ${url.substring(0,80)}`);
-        }
+        window.open=function(){return null;};
+        function reanudarPeli(){ try{ const c=document.elementFromPoint(window.innerWidth/2, window.innerHeight/2); if(c) c.click(); document.querySelectorAll('.jw-display-icon-container, .vjs-big-play-button, .voe-play, .vjs-big-play').forEach(el=>{ const r=el.getBoundingClientRect(); if(r.width>20) el.click(); }); document.querySelectorAll('video').forEach(v=>{ if(v.paused) v.play().catch(()=>{}); }); if(window.jwplayer){ try{ const p=window.jwplayer(); if(p && p.play) p.play(); }catch(e){} } }catch(e){} }
+        function matarAdVideo(){ try{ const flag=document.querySelector('.jw-flag-ads, .jw-ad-label'); const flagVisible=flag && flag.offsetParent!==null; let mato=false; document.querySelectorAll('video').forEach(v=>{ if((v.duration>0 && v.duration<90) || flagVisible){ mato=true; try{ v.muted=true; v.playbackRate=16; v.currentTime=v.duration>0?v.duration-0.05:9999; v.dispatchEvent(new Event('ended')); if(window.jwplayer){ try{ const p=window.jwplayer(); if(p && p.skipAd) p.skipAd(); }catch(e){} } }catch(e){} } }); if(mato){ setTimeout(reanudarPeli, 300); setTimeout(reanudarPeli, 1200); } }catch(e){} }
+        function cerrarModales(){ document.querySelectorAll('button').forEach(b=>{ const t=(b.innerText||'').toLowerCase(); if(t==='cerrar' || t==='close' || t.includes('continue') || t.includes('skip')) b.click(); }); }
+        function autoClickPlay(){ try{ cerrarModales(); const c=document.elementFromPoint(window.innerWidth/2, window.innerHeight/2); if(c) c.click(); document.querySelectorAll('.jw-display-icon-container, .vjs-big-play-button').forEach(el=>{ const r=el.getBoundingClientRect(); if(r.width>40) el.click(); }); }catch(e){} }
+        setInterval(matarAdVideo, 80);
+        setInterval(autoClickPlay, 700);
+        setInterval(cerrarModales, 500);
       }catch(e){}
-    });
+    `).catch(()=>{});
+  });
 
-    await page.goto(peli.url_pagina, {waitUntil:'domcontentloaded', timeout:90000});
-    await new Promise(r=>setTimeout(r, 5000));
+  videoWin.on('closed', ()=>{
+    videoWin=null;
+    if(timeoutSin) clearTimeout(timeoutSin);
+    procesandoCola=false;
+    if(modoAuto && colaVencidos.length>0) setTimeout(abrirSiguienteDeCola, 1000);
+    else if(modoAuto && colaVencidos.length===0){ modoAuto=false; if(win && !win.isDestroyed()) win.webContents.send('cola-fin'); }
+  });
+}
 
-    // MISMO AUTOPLAY QUE TU ELECTRON
-    for(let i=0; i<40; i++){
-      try{
-        await page.evaluate(`
-          try{
-            window.open=function(){return null;};
-            function reanudarPeli(){ try{ const c=document.elementFromPoint(window.innerWidth/2, window.innerHeight/2); if(c) c.click(); document.querySelectorAll('.jw-display-icon-container, .vjs-big-play-button, .voe-play, .vjs-big-play').forEach(el=>{ const r=el.getBoundingClientRect(); if(r.width>20) el.click(); }); document.querySelectorAll('video').forEach(v=>{ if(v.paused) v.play().catch(()=>{}); }); }catch(e){} }
-            function matarAdVideo(){ try{ const flag=document.querySelector('.jw-flag-ads, .jw-ad-label'); const flagVisible=flag && flag.offsetParent!==null; let mato=false; document.querySelectorAll('video').forEach(v=>{ if((v.duration>0 && v.duration<90) || flagVisible){ mato=true; try{ v.muted=true; v.playbackRate=16; v.currentTime=v.duration>0?v.duration-0.05:9999; v.dispatchEvent(new Event('ended')); }catch(e){} } }); if(mato){ setTimeout(reanudarPeli, 300); } }catch(e){} }
-            function cerrarModales(){ document.querySelectorAll('button').forEach(b=>{ const t=(b.innerText||'').toLowerCase(); if(t==='cerrar' || t==='close' || t.includes('continue') || t.includes('skip')) b.click(); }); }
-            function autoClickPlay(){ try{ cerrarModales(); const c=document.elementFromPoint(window.innerWidth/2, window.innerHeight/2); if(c) c.click(); document.querySelectorAll('.jw-display-icon-container, .vjs-big-play-button').forEach(el=>{ const r=el.getBoundingClientRect(); if(r.width>40) el.click(); }); }catch(e){} }
-            matarAdVideo();
-            autoClickPlay();
-          }catch(e){}
-        `);
-      }catch(e){
-        if(e.message.includes('Execution context was destroyed')){
-          console.log(`[NAV ${i}s] ignorada`);
-          await new Promise(r=>setTimeout(r,1000));
-          continue;
+ipcMain.on('abrir-url',(e,data)=>{ if(win && !win.isDestroyed()) win.webContents.send('cola-cancelada'); modoAuto=false; colaVencidos=[]; procesandoCola=false; openVideoPage(data.url,{id:data.id,titulo:data.titulo},false); });
+ipcMain.on('abrir-cola-vencidos',(e,lista)=>{ colaVencidos=lista; procesandoCola=false; abrirSiguienteDeCola(); });
+
+app.whenReady().then(()=>{
+  createWindow();
+  app.on('web-contents-created', (event, contents) => { contents.setWindowOpenHandler(() => { return { action: 'deny' }; }); });
+  session.defaultSession.webRequest.onBeforeRequest({urls:["<all_urls>"]}, async (details,cb)=>{
+    const url=details.url;
+    const low=url.toLowerCase();
+    // SI ES VOE / DOOD / STREAMTAPE, DEJA PASAR TODO, NO BLOQUEES NADA
+    if(low.includes('voe.sx') || low.includes('voe-network') || low.includes('streamtape') || low.includes('dood') || low.includes('mixdrop')){
+      cb({}); return;
+    }
+    if(esAnuncio(url)){ cb({cancel:true}); return; }
+    if(!url.includes(".m3u8")){ cb({}); return; }
+    const lowUrl = url.toLowerCase();
+    if(/\/index-a\d+\.m3u8/i.test(lowUrl) && !/\/index-v\d+/i.test(lowUrl)){ console.log('[AUDIO PURO BLOQUEADO]', url); cb({cancel:true}); return; }
+    if(lowUrl.includes('/audio/') && !lowUrl.includes('index-v')){ cb({cancel:true}); return; }
+    if(m3u8List.includes(url)){ cb({}); return; }
+    const contenido=await fetchM3U8(url);
+    if(esAudioSolo(contenido,url)){ console.log('[AUDIO BLOQUEADO]', url); cb({cancel:true}); return; }
+    if(esVideoAnuncio(contenido,url)){ cb({cancel:true}); return; }
+    m3u8List.push(url);
+    const expira=getExpiracion(url);
+    const calidad=getCalidadScore(url);
+    let debeGuardar=false;
+    if(expira>mejorExpira) debeGuardar=true;
+    else if(expira===mejorExpira && calidad>mejorCalidad) debeGuardar=true;
+    else if(mejorExpira===0) debeGuardar=true;
+    if(debeGuardar){
+      mejorExpira=expira; mejorCalidad=calidad;
+      if(currentPeli){
+        console.log(`[VIDEO GUARDADO ${Math.floor((expira-Date.now()/1000)/3600)}h]`, url);
+        try{
+          await actualizarUrlVideo(currentPeli.id,url,expira);
+          if(win && !win.isDestroyed()) win.webContents.send('m3u8-guardado',{id:currentPeli.id,url,expira_en:expira});
+          if(modoAuto){ setTimeout(()=>{ if(videoWin && !videoWin.isDestroyed()) videoWin.destroy(); }, 2500); }
+        }catch(error){
+          console.error(`[ERROR ACTUALIZANDO LINK ${currentPeli.id}]`, error);
         }
       }
-      await new Promise(r=>setTimeout(r,1000));
-      if(m3u8Bueno) break;
     }
-
-    if(m3u8Bueno){
-      const fecha= mejorExpira ? new Date(mejorExpira*1000).toISOString() : new Date().toISOString();
-      const updateData = {url_video:m3u8Bueno, expira_at:fecha};
-      if(mejorExpira) updateData.expira_en = mejorExpira;
-      else updateData.expira_en = null; // VOE no expira
-      await supabase.from('peliculas_series').update(updateData).eq('id', peli.id);
-      console.log(`[GUARDADO OK] ID ${peli.id} - ${m3u8Bueno.substring(0,80)}`);
-    } else {
-      console.log(`[FALLO] No m3u8 ID ${peli.id} - ${peli.url_pagina}`);
-    }
-    await browser.close();
-    return !!m3u8Bueno;
-  }catch(e){ 
-    console.log('Error ID', peli.id, e.message); 
-    if(browser) try{await browser.close()}catch(_){} 
-    return false; 
-  }
-}
-
-async function loopAuto(){
-  console.log('--- Revisando vencidos SOLO PELICULAS ---');
-  const { data } = await supabase.from('peliculas_series').select('id,titulo,url_pagina,url_video,expira_en').eq('tipo','pelicula').not('url_pagina','is',null).limit(1000);
-  if(!data) return;
-  const ahora = Math.floor(Date.now()/1000);
-  // AHORA SI INCLUYE VOE, IGUAL QUE TU LOCAL
-  const vencidos = data.filter(p=>{
-    let exp = p.expira_en || 0;
-    if(!exp && p.url_video) exp=getExpiracion(p.url_video);
-    const pagina = (p.url_pagina||'').toLowerCase();
-    // VOE nunca vence, pero si no tiene url_video si hay que arreglarlo
-    if(pagina.includes('voe.sx') || pagina.includes('voe-network') || pagina.includes('streamtape') || pagina.includes('dood')){
-      return !p.url_video; // solo si no tiene video
-    }
-    return !exp || exp < ahora+3600;
+    cb({});
   });
-  console.log(`Vencidos (con Voe si falta video): ${vencidos.length}`);
-  for(let peli of vencidos.slice(0,3)){
-    await arreglarUnaPelicula(peli);
-    await new Promise(r=>setTimeout(r, 8000));
-  }
-}
-
-app.get('/', (req,res)=>res.send('Wolfmax 24/7 ONLINE - Logica IGUAL Electron - VOE INCLUIDO - CHROMIUM OK'));
-app.get('/status', async (req,res)=>{
-  const { data } = await supabase.from('peliculas_series').select('id').eq('tipo','pelicula').not('url_pagina','is',null);
-  res.json({total:data?.length, online:true, hora:new Date().toLocaleString('es-PE')});
-});
-app.get('/fix-now', async (req,res)=>{ res.send('Iniciando fix...'); loopAuto(); });
-
-app.listen(PORT, ()=>{
-  console.log(`Servidor en puerto ${PORT}`);
-  setInterval(loopAuto, 5*60*1000);
-  loopAuto();
 });
